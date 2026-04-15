@@ -1,22 +1,282 @@
 # json2tm
 
-# Usage
+Convert JSON translation files (EN / DE / RU) into **TMX** and **XLSX** translation memories.
 
-`pip install tqdm openpyxl`
+---
 
+## Features
+
+- Converts deeply nested JSON translation files into industry-standard TMX and Excel formats
+- Supports both `snake_case` (`label_en`) and `camelCase` (`labelEn`) field naming conventions
+- Processes a single file triplet or an entire directory tree recursively
+- Deduplicates segments globally across all processed files
+- Validates JSON structure, UUID field format, and translation field types before extraction
+- Warns on structural mismatches between language files (missing keys, array length differences)
+- Live progress bars for extraction and output writing (requires `tqdm`)
+- Prints a full processing summary: files loaded, segments created, duplicates skipped, errors
+
+---
+
+## Requirements
+
+- Python 3.10+
+- `tqdm` — progress bars
+- `openpyxl` — XLSX output
+
+```bash
+pip install tqdm openpyxl
 ```
+
+Both dependencies are optional. The script runs without them but will skip XLSX output if `openpyxl` is missing, and will print plain progress messages instead of bars if `tqdm` is missing.
+
+---
+
+## JSON structure
+
+The script expects three files with the same nested structure. Translatable fields are identified by their language suffix:
+
+| Style | EN source | DE target | RU target |
+|-------|-----------|-----------|-----------|
+| snake_case | `label_en` | `label_de` | `label_ru` |
+| camelCase | `labelEn` | `labelDe` | `labelRu` |
+
+Any field whose name ends with one of these suffixes is treated as translatable. All other fields are treated as structural and recursed into. Fields ending in `_de` / `_ru` (or `De` / `Ru`) are read as target text and not recursed into.
+
+Example input structure:
+
+```json
+{
+  "categoryUuid": "1bf0c51a-026a-4130-a423-f6d48264452d",
+  "categoryName": "Andrology",
+  "labelEn": "Diseases of male genital organs",
+  "pathologies": [
+    {
+      "types": [
+        {
+          "bundles": [
+            {
+              "groups": [
+                {
+                  "group_uuid": "05d20a20-9e6e-4bf0-9eef-4d4c896a9ef1",
+                  "group_name_en": "Integument",
+                  "group_name_de": null,
+                  "group_name_ru": null,
+                  "parts": [
+                    {
+                      "part_uuid": "79a04a2d-7ffe-42dc-9a49-ac87eb2fc0e9",
+                      "label_en": "Skin",
+                      "label_de": null,
+                      "label_ru": null,
+                      "article_en": null,
+                      "article_de": null,
+                      "article_ru": null
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## Usage
+
+### Single file mode
+
+Pass one JSON file per language. All three flags are required.
+
+```bash
 python json2tm.py \
   --en translations_en.json \
   --de translations_de.json \
-  --ru translations_ru.json \
-  --out output/
+  --ru translations_ru.json
 ```
 
-# Flags
-  
-| Flag    | Purpose |
-| -------- | ------- |
-| --out DIR  | Output directory (default: output/)    |
-| --same-keys | All three files use identical field names; text values differ per language     |
-| --no-tmx    | Skip TMX output    |
-| --no-xlsx    | Skip XLSX output    |
+### Directory mode (recursive)
+
+Pass a directory per language. The script recursively finds every `*.json` file under the EN directory and pairs it with the file at the same relative path in the DE and RU directories.
+
+```bash
+python json2tm.py \
+  --en data/en/ \
+  --de data/de/ \
+  --ru data/ru/
+```
+
+Expected layout:
+
+```
+data/
+├── en/
+│   ├── andrology.json
+│   ├── cardiology.json
+│   └── subspecialties/
+│       └── neurology.json
+├── de/
+│   ├── andrology.json
+│   ├── cardiology.json
+│   └── subspecialties/
+│       └── neurology.json
+└── ru/
+    ├── andrology.json
+    ├── cardiology.json
+    └── subspecialties/
+        └── neurology.json
+```
+
+Files are matched by relative path: `en/subspecialties/neurology.json` → `de/subspecialties/neurology.json` → `ru/subspecialties/neurology.json`. Missing counterparts are reported as load failures but do not stop the rest of the run.
+
+---
+
+## Flags
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--en FILE/DIR` | Yes | — | English source file or directory |
+| `--de FILE/DIR` | Yes | — | German target file or directory |
+| `--ru FILE/DIR` | Yes | — | Russian target file or directory |
+| `--out DIR` | No | `output/` | Output directory |
+| `--same-keys` | No | off | Use when all three files share the same field names (e.g. all use `label_en`) and the text values differ per language |
+| `--no-tmx` | No | off | Skip TMX output |
+| `--no-xlsx` | No | off | Skip XLSX output |
+
+---
+
+## Output
+
+All output files are written to the directory specified by `--out` (default: `output/`).
+
+### TMX files
+
+Two TMX 1.4 files, one per language pair:
+
+| File | Content |
+|------|---------|
+| `en-de.tmx` | English → German translation units |
+| `en-ru.tmx` | English → Russian translation units |
+
+Each file contains only clean `<tu>` / `<tuv>` / `<seg>` elements with no metadata or UUIDs. Language codes follow ISO 639-1 (`en`, `de`, `ru`). The files are compatible with SDL Trados, memoQ, OmegaT, and any other TMX 1.4-compliant CAT tool.
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE tmx SYSTEM "tmx14.dtd">
+<tmx version="1.4">
+  <header creationtool="json2tm" creationtoolversion="1.0"
+          datatype="plaintext" segtype="sentence"
+          adminlang="en" srclang="en" o-tmf="json2tm"/>
+  <body>
+    <tu>
+      <tuv xml:lang="en"><seg>Skin</seg></tuv>
+      <tuv xml:lang="de"><seg>Haut</seg></tuv>
+    </tu>
+  </body>
+</tmx>
+```
+
+### XLSX file
+
+`translations.xlsx` contains three sheets:
+
+| Sheet | Content |
+|-------|---------|
+| **Summary** | Total segments, EN→DE count, EN→RU count, generation timestamp |
+| **EN-DE** | Row per segment: `#`, Segment ID, EN source, DE target, Context UUID, JSON path |
+| **EN-RU** | Same layout for EN→RU pairs |
+
+Rows with a missing translation are highlighted in red.
+
+---
+
+## Validation
+
+Before extraction the script runs the following checks on each file:
+
+| Check | Severity |
+|-------|----------|
+| JSON syntax and UTF-8 encoding | Error — file is skipped |
+| UUID fields match standard UUID format | Error |
+| Language-tagged fields contain strings or null | Error |
+| Language-tagged fields contain empty strings | Warning |
+| Key-set mismatch between EN and DE/RU at the same path | Warning |
+| Array length mismatch between EN and DE/RU at the same path | Warning |
+| Missing DE or RU translation for an EN source field | Warning |
+
+Errors cause the affected triplet to be skipped. Warnings are collected and printed in the summary but do not stop processing.
+
+---
+
+## Deduplication
+
+A segment is considered a duplicate if its `(en, de, ru)` text triplet was already seen in a previous file or earlier in the same file. The first occurrence is kept; all subsequent ones are counted in *Skipped — duplicate* in the summary. Deduplication is global across the entire run.
+
+---
+
+## `--same-keys` mode
+
+By default the script looks for language-specific field names: it reads `label_en` from the EN file and looks for `label_de` in the DE file at the same path.
+
+If your files all use the same field names and the language is determined by which file you are reading — e.g. the DE file has `label_en` but its value is in German — pass `--same-keys`:
+
+```bash
+python json2tm.py --en en.json --de de.json --ru ru.json --same-keys
+```
+
+In this mode the value of every `*_en` / `*En` field is read from each respective file as-is.
+
+---
+
+## Example output
+
+```
+── Directory mode  (3 file triplets) ────────────────────────
+  ✓  [1/3] EN  andrology.json  (84,201 bytes)
+  ✓  [1/3] DE  andrology.json  (91,455 bytes)
+  ✓  [1/3] RU  andrology.json  (98,302 bytes)
+  [1/3] lint [EN]  ✓
+  [1/3] lint [DE]  ✓
+  [1/3] lint [RU]  ✓
+  [1/3] extracting: 100%|██████████| 1,842 fields [00:00]
+  ✓  [2/3] EN  cardiology.json  (76,540 bytes)
+  ...
+
+  5,214 candidate segments collected across all files
+
+── Deduplicating ────────────────────────────────────────────
+  308 duplicates removed → 4,906 unique segments
+
+── Writing TMX ──────────────────────────────────────────────
+  ✓  en-de.tmx  (4,906 TUs, 1,204.3 KB)
+  ✓  en-ru.tmx  (4,906 TUs, 1,318.7 KB)
+
+── Writing XLSX ─────────────────────────────────────────────
+  ✓  translations.xlsx  (4,906 segments, 2,847.1 KB)
+
+════════════════════════════════════════════════════════════
+                     PROCESSING SUMMARY
+════════════════════════════════════════════════════════════
+  Files processed:               9
+    ✓  loaded OK:                9
+    ✗  load failures:            0
+────────────────────────────────────────────────────────────
+  Segments created:              4,906
+  Skipped — duplicate:           308
+  Skipped — null/empty:          147
+  Errors:                        0
+  Warnings:                      0
+════════════════════════════════════════════════════════════
+```
+
+---
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success (warnings do not affect exit code) |
+| `1` | One or more errors were encountered |

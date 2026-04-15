@@ -17,12 +17,23 @@ If the DE / RU files carry the same field names as EN (e.g. all three files
 use label_en but with different text), pass --same-keys and the value of
 each *_en field is read from the corresponding file.
 
-Usage
------
+Usage — single files
+---------------------
     python json2tm.py --en translations_en.json \\
                       --de translations_de.json \\
                       --ru translations_ru.json \\
                       [--out output/] [--same-keys] [--no-tmx] [--no-xlsx]
+
+Usage — directories (recursive)
+---------------------------------
+    python json2tm.py --en path/to/en/ \\
+                      --de path/to/de/ \\
+                      --ru path/to/ru/ \\
+                      [--out output/]
+
+    Every *.json file found (recursively) under the EN directory is paired
+    with the file at the same relative path inside the DE and RU directories.
+    All triplets are processed in one run; segments are deduplicated globally.
 
 Dependencies
 ------------
@@ -587,6 +598,58 @@ def write_xlsx(segments: list[Segment], out_path: Path, pbar) -> int:
     return len(segments)
 
 
+# ── Triplet resolver ──────────────────────────────────────────────────────────
+
+def resolve_triplets(
+    en_path: Path, de_path: Path, ru_path: Path
+) -> list[tuple[Path, Path, Path]]:
+    """
+    Return a list of (en_file, de_file, ru_file) tuples.
+
+    File mode  : all three paths are files → single-element list.
+    Dir mode   : en_path is a directory → recursively glob *.json, then
+                 resolve each file's relative path inside de_path / ru_path.
+    Mixed paths (file + dir) are rejected early with a clear error.
+    """
+    en_is_dir = en_path.is_dir()
+    de_is_dir = de_path.is_dir()
+    ru_is_dir = ru_path.is_dir()
+
+    if not en_is_dir and not de_is_dir and not ru_is_dir:
+        # ── file mode ────────────────────────────────────────────────────────
+        for p, flag in ((en_path, "--en"), (de_path, "--de"), (ru_path, "--ru")):
+            if not p.exists():
+                sys.exit(f"Error: {flag} file not found: {p}")
+            if not p.is_file():
+                sys.exit(f"Error: {flag} path is not a file: {p}")
+        return [(en_path, de_path, ru_path)]
+
+    # ── directory mode ───────────────────────────────────────────────────────
+    if not (en_is_dir and de_is_dir and ru_is_dir):
+        mixed = [
+            f"--en ({en_path})" if en_is_dir else f"--en is a file ({en_path})",
+            f"--de ({de_path})" if de_is_dir else f"--de is a file ({de_path})",
+            f"--ru ({ru_path})" if ru_is_dir else f"--ru is a file ({ru_path})",
+        ]
+        sys.exit(
+            "Error: --en, --de and --ru must all be files or all be directories.\n"
+            + "\n".join(f"  {m}" for m in mixed)
+        )
+
+    en_files = sorted(en_path.rglob("*.json"))
+    if not en_files:
+        sys.exit(f"Error: no *.json files found under {en_path}")
+
+    triplets: list[tuple[Path, Path, Path]] = []
+    for en_file in en_files:
+        rel     = en_file.relative_to(en_path)
+        de_file = de_path / rel
+        ru_file = ru_path / rel
+        triplets.append((en_file, de_file, ru_file))
+
+    return triplets
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -595,12 +658,12 @@ def build_parser() -> argparse.ArgumentParser:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--en",        required=True, metavar="FILE",
-                   help="English source JSON file")
-    p.add_argument("--de",        required=True, metavar="FILE",
-                   help="German target JSON file")
-    p.add_argument("--ru",        required=True, metavar="FILE",
-                   help="Russian target JSON file")
+    p.add_argument("--en",        required=True, metavar="FILE/DIR",
+                   help="English source: a single JSON file or a directory of JSON files")
+    p.add_argument("--de",        required=True, metavar="FILE/DIR",
+                   help="German target: a single JSON file or a directory (must match --en)")
+    p.add_argument("--ru",        required=True, metavar="FILE/DIR",
+                   help="Russian target: a single JSON file or a directory (must match --en)")
     p.add_argument("--out",       default="output", metavar="DIR",
                    help="Output directory  (default: output/)")
     p.add_argument("--same-keys", action="store_true",
@@ -619,43 +682,56 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 1. Load ───────────────────────────────────────────────────────────────
-    print("\n── Loading files ────────────────────────────────────────────")
-    en_data = load_json(Path(args.en), "EN", stats)
-    de_data = load_json(Path(args.de), "DE", stats)
-    ru_data = load_json(Path(args.ru), "RU", stats)
+    # ── 1. Resolve file triplets ──────────────────────────────────────────────
+    triplets = resolve_triplets(Path(args.en), Path(args.de), Path(args.ru))
+    dir_mode = Path(args.en).is_dir()
+    print(
+        f"\n── {'Directory' if dir_mode else 'File'} mode"
+        f"  ({len(triplets):,} file triplet{'s' if len(triplets) != 1 else ''}) "
+        + "─" * 20
+    )
 
-    if any(d is None for d in (en_data, de_data, ru_data)):
-        print("\nFatal: one or more files could not be loaded. Aborting.")
+    # ── 2. Load → Lint → Extract  (one triplet at a time) ────────────────────
+    raw: list[Segment] = []
+
+    for i, (en_p, de_p, ru_p) in enumerate(triplets, 1):
+        prefix = f"[{i}/{len(triplets)}]" if len(triplets) > 1 else ""
+
+        # Load
+        en_data = load_json(en_p, f"{prefix} EN", stats)
+        de_data = load_json(de_p, f"{prefix} DE", stats)
+        ru_data = load_json(ru_p, f"{prefix} RU", stats)
+
+        if any(d is None for d in (en_data, de_data, ru_data)):
+            print(f"  ⚠  Skipping triplet {i} (load failure)")
+            continue
+
+        # Lint
+        for data, label in ((en_data, "EN"), (de_data, "DE"), (ru_data, "RU")):
+            before = len(stats.errors)
+            lint(data, label, stats)
+            n_new  = len(stats.errors) - before
+            sym    = "✓" if n_new == 0 else f"✗ ({n_new} errors)"
+            print(f"  {prefix} lint [{label}]  {sym}")
+
+        # Extract
+        total_en = _count_en_fields(en_data)
+        with _tqdm_cls(
+            total=total_en,
+            desc=f"  {prefix} extracting",
+            unit=" fields",
+            dynamic_ncols=True,
+            colour="cyan",
+            disable=not HAS_TQDM,
+        ) as pbar:
+            _walk(en_data, de_data, ru_data, "", None, args.same_keys, stats, pbar, raw)
+
+    if not raw:
+        print("\nNo segments extracted. Aborting.")
         stats.report()
         sys.exit(1)
 
-    # ── 2. Lint ───────────────────────────────────────────────────────────────
-    print("\n── Linting ──────────────────────────────────────────────────")
-    for data, label in ((en_data, "EN"), (de_data, "DE"), (ru_data, "RU")):
-        before = len(stats.errors)
-        lint(data, label, stats)
-        n_new = len(stats.errors) - before
-        sym = "✓" if n_new == 0 else f"✗ ({n_new} errors)"
-        print(f"  [{label}]  {sym}")
-
-    # ── 3. Count (for progress bar) ───────────────────────────────────────────
-    total_en = _count_en_fields(en_data)
-    print(f"\n── Extracting segments ({total_en:,} EN fields found) ────────────")
-
-    # ── 4. Extract with progress bar ─────────────────────────────────────────
-    raw: list[Segment] = []
-    with _tqdm_cls(
-        total=total_en,
-        desc="  Extracting",
-        unit=" fields",
-        dynamic_ncols=True,
-        colour="cyan",
-        disable=not HAS_TQDM,
-    ) as pbar:
-        _walk(en_data, de_data, ru_data, "", None, args.same_keys, stats, pbar, raw)
-
-    print(f"  {len(raw):,} candidate segments collected")
+    print(f"\n  {len(raw):,} candidate segments collected across all files")
 
     # ── 5. Deduplicate ────────────────────────────────────────────────────────
     print("\n── Deduplicating ────────────────────────────────────────────")
