@@ -454,9 +454,6 @@ def seg_id(en_text: str) -> str:
 
 # ── TMX writer ────────────────────────────────────────────────────────────────
 
-_TMX_DATE_FMT = "%Y%m%dT%H%M%SZ"
-
-
 def write_tmx(
     segments:  list[Segment],
     src_bcp47: str,
@@ -465,8 +462,6 @@ def write_tmx(
     out_path:  Path,
     pbar,
 ) -> int:
-    now = datetime.now(timezone.utc).strftime(_TMX_DATE_FMT)
-
     root = ET.Element("tmx", version="1.4")
     ET.SubElement(
         root, "header",
@@ -487,12 +482,7 @@ def write_tmx(
             pbar.update(1)
             continue
 
-        tuid = f"{seg_id(seg.en)}-{seg.ctx_uuid or 'noctx'}"
-        tu = ET.SubElement(body, "tu", tuid=tuid, creationdate=now)
-
-        if seg.ctx_uuid:
-            ET.SubElement(tu, "prop", type="context-uuid").text = seg.ctx_uuid
-        ET.SubElement(tu, "prop", type="source-path").text = seg.path
+        tu = ET.SubElement(body, "tu")
 
         src_tuv = ET.SubElement(tu, "tuv", **{"xml:lang": src_bcp47})
         ET.SubElement(src_tuv, "seg").text = seg.en
