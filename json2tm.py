@@ -326,7 +326,8 @@ def _walk(
     stats:       Stats,
     pbar,
     out:         list[Segment],
-    text_fields: set[str] = frozenset(),
+    text_fields:  set[str]       = frozenset(),
+    active_langs: frozenset[str] = frozenset({"de", "ru"}),
 ) -> None:
     """
     Recursively walk all three trees in lock-step.
@@ -346,25 +347,29 @@ def _walk(
         de_d = de_node if isinstance(de_node, dict) else {}
         ru_d = ru_node if isinstance(ru_node, dict) else {}
 
-        # Structure consistency check (key-sets must match)
-        en_keys = set(en_node.keys())
-        # Structural key-set comparison — ignore language-tagged keys in peer
-        # files because DE/RU files legitimately add their own *_de / *_ru /
-        # *De / *Ru variants that aren't present in the EN file.
+        # Structure consistency check (key-sets of non-language keys must match).
+        # Strip ALL language-tagged keys before comparing: each file legitimately
+        # holds only its own language variants (*_en / *_de / *_ru / camelCase
+        # equivalents), so those must never be treated as structural mismatches.
         def _structural_keys(d: dict) -> set[str]:
-            return {k for k in d if not _is_de_key(k) and not _is_ru_key(k)}
+            return {
+                k for k in d
+                if not _is_en_key(k) and not _is_de_key(k) and not _is_ru_key(k)
+            }
 
         en_struct = _structural_keys(en_node)
-        if _structural_keys(de_d) != en_struct:
-            missing = en_struct - _structural_keys(de_d)
-            extra   = _structural_keys(de_d) - en_struct
-            if missing: stats.warn(f"DE missing keys at {path!r}: {sorted(missing)}")
-            if extra:   stats.warn(f"DE extra keys at {path!r}: {sorted(extra)}")
-        if _structural_keys(ru_d) != en_struct:
-            missing = en_struct - _structural_keys(ru_d)
-            extra   = _structural_keys(ru_d) - en_struct
-            if missing: stats.warn(f"RU missing keys at {path!r}: {sorted(missing)}")
-            if extra:   stats.warn(f"RU extra keys at {path!r}: {sorted(extra)}")
+        if "de" in active_langs:
+            if _structural_keys(de_d) != en_struct:
+                missing = en_struct - _structural_keys(de_d)
+                extra   = _structural_keys(de_d) - en_struct
+                if missing: stats.warn(f"DE missing keys at {path!r}: {sorted(missing)}")
+                if extra:   stats.warn(f"DE extra keys at {path!r}: {sorted(extra)}")
+        if "ru" in active_langs:
+            if _structural_keys(ru_d) != en_struct:
+                missing = en_struct - _structural_keys(ru_d)
+                extra   = _structural_keys(ru_d) - en_struct
+                if missing: stats.warn(f"RU missing keys at {path!r}: {sorted(missing)}")
+                if extra:   stats.warn(f"RU extra keys at {path!r}: {sorted(extra)}")
 
         for key, en_val in en_node.items():
             cpath = f"{path}.{key}" if path else key
@@ -396,9 +401,9 @@ def _walk(
                 de_text = str(de_val).strip() if isinstance(de_val, str) and de_val else None
                 ru_text = str(ru_val).strip() if isinstance(ru_val, str) and ru_val else None
 
-                if de_text is None:
+                if "de" in active_langs and de_text is None:
                     stats.warn(f"No DE translation for {cpath!r}")
-                if ru_text is None:
+                if "ru" in active_langs and ru_text is None:
                     stats.warn(f"No RU translation for {cpath!r}")
 
                 out.append(Segment(cpath, uuid, en_text, de_text, ru_text))
@@ -420,9 +425,9 @@ def _walk(
                 de_text = str(de_raw).strip() if isinstance(de_raw, str) and de_raw else None
                 ru_text = str(ru_raw).strip() if isinstance(ru_raw, str) and ru_raw else None
 
-                if de_text is None:
+                if "de" in active_langs and de_text is None:
                     stats.warn(f"No DE translation for text-field {cpath!r}")
-                if ru_text is None:
+                if "ru" in active_langs and ru_text is None:
                     stats.warn(f"No RU translation for text-field {cpath!r}")
 
                 out.append(Segment(cpath, uuid, en_text, de_text, ru_text))
@@ -441,17 +446,18 @@ def _walk(
                     pbar,
                     out,
                     text_fields,
+                    active_langs,
                 )
 
     elif isinstance(en_node, list):
         de_l = de_node if isinstance(de_node, list) else []
         ru_l = ru_node if isinstance(ru_node, list) else []
 
-        if len(de_l) != len(en_node):
+        if "de" in active_langs and len(de_l) != len(en_node):
             stats.warn(
                 f"Array length mismatch at {path!r}: EN={len(en_node)}, DE={len(de_l)}"
             )
-        if len(ru_l) != len(en_node):
+        if "ru" in active_langs and len(ru_l) != len(en_node):
             stats.warn(
                 f"Array length mismatch at {path!r}: EN={len(en_node)}, RU={len(ru_l)}"
             )
@@ -468,6 +474,7 @@ def _walk(
                 pbar,
                 out,
                 text_fields,
+                active_langs,
             )
 
 
@@ -726,7 +733,13 @@ def _apply_header(ws, columns: list[str]) -> None:
     ws.row_dimensions[1].height = 22
 
 
-def write_xlsx(segments: list[Segment], out_path: Path, pbar) -> int:
+def write_xlsx(
+    segments: list[Segment],
+    out_path: Path,
+    pbar,
+    has_de:   bool = True,
+    has_ru:   bool = True,
+) -> int:
     if not HAS_OPENPYXL:
         print("  ⚠  openpyxl not installed — skipping XLSX output", file=sys.stderr)
         return 0
@@ -771,22 +784,23 @@ def write_xlsx(segments: list[Segment], out_path: Path, pbar) -> int:
         ws.freeze_panes = "A2"
         return count
 
-    ws_de = wb.create_sheet("EN-DE")
-    n_de  = _fill_sheet(ws_de, "de", "qa_de")
-
-    ws_ru = wb.create_sheet("EN-RU")
-    n_ru  = _fill_sheet(ws_ru, "ru", "qa_ru")
+    n_de = n_ru = 0
+    if has_de:
+        ws_de = wb.create_sheet("EN-DE")
+        n_de  = _fill_sheet(ws_de, "de", "qa_de")
+    if has_ru:
+        ws_ru = wb.create_sheet("EN-RU")
+        n_ru  = _fill_sheet(ws_ru, "ru", "qa_ru")
 
     # Summary sheet (front)
     ws_s = wb.create_sheet("Summary", 0)
     _apply_header(ws_s, ["Metric", "Value"])
-    for row in [
-        ("Total unique segments",  len(segments)),
-        ("EN→DE pairs",            n_de),
-        ("EN→RU pairs",            n_ru),
-        ("Generated at",           datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        ("Tool",                   f"{TOOL_NAME} {TOOL_VERSION}"),
-    ]:
+    summary_rows: list[tuple] = [("Total unique segments", len(segments))]
+    if has_de: summary_rows.append(("EN→DE pairs", n_de))
+    if has_ru: summary_rows.append(("EN→RU pairs", n_ru))
+    summary_rows.append(("Generated at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    summary_rows.append(("Tool",          f"{TOOL_NAME} {TOOL_VERSION}"))
+    for row in summary_rows:
         ws_s.append(row)
     ws_s.column_dimensions["A"].width = 24
     ws_s.column_dimensions["B"].width = 26
@@ -799,50 +813,55 @@ def write_xlsx(segments: list[Segment], out_path: Path, pbar) -> int:
 # ── Triplet resolver ──────────────────────────────────────────────────────────
 
 def resolve_triplets(
-    en_path: Path, de_path: Path, ru_path: Path
-) -> list[tuple[Path, Path, Path]]:
+    en_path: Path, de_path: Path | None, ru_path: Path | None
+) -> list[tuple[Path, Path | None, Path | None]]:
     """
     Return a list of (en_file, de_file, ru_file) tuples.
 
-    File mode  : all three paths are files → single-element list.
+    de_path / ru_path may be None when a language was not supplied.
+
+    File mode  : en_path is a file → single-element list.
     Dir mode   : en_path is a directory → recursively glob *.json, then
                  resolve each file's relative path inside de_path / ru_path.
     Mixed paths (file + dir) are rejected early with a clear error.
     """
     en_is_dir = en_path.is_dir()
-    de_is_dir = de_path.is_dir()
-    ru_is_dir = ru_path.is_dir()
 
-    if not en_is_dir and not de_is_dir and not ru_is_dir:
+    # Each provided target must be the same kind (file vs dir) as EN.
+    for tgt_path, flag in ((de_path, "--de"), (ru_path, "--ru")):
+        if tgt_path is None:
+            continue
+        if tgt_path.is_dir() != en_is_dir:
+            sys.exit(
+                f"Error: --en and {flag} must both be files or both be directories.\n"
+                f"  --en  {'dir' if en_is_dir else 'file'} ({en_path})\n"
+                f"  {flag}  {'dir' if tgt_path.is_dir() else 'file'} ({tgt_path})"
+            )
+
+    if not en_is_dir:
         # ── file mode ────────────────────────────────────────────────────────
-        for p, flag in ((en_path, "--en"), (de_path, "--de"), (ru_path, "--ru")):
-            if not p.exists():
-                sys.exit(f"Error: {flag} file not found: {p}")
-            if not p.is_file():
-                sys.exit(f"Error: {flag} path is not a file: {p}")
+        if not en_path.exists():
+            sys.exit(f"Error: --en file not found: {en_path}")
+        if not en_path.is_file():
+            sys.exit(f"Error: --en path is not a file: {en_path}")
+        for tgt_path, flag in ((de_path, "--de"), (ru_path, "--ru")):
+            if tgt_path is not None:
+                if not tgt_path.exists():
+                    sys.exit(f"Error: {flag} file not found: {tgt_path}")
+                if not tgt_path.is_file():
+                    sys.exit(f"Error: {flag} path is not a file: {tgt_path}")
         return [(en_path, de_path, ru_path)]
 
     # ── directory mode ───────────────────────────────────────────────────────
-    if not (en_is_dir and de_is_dir and ru_is_dir):
-        mixed = [
-            f"--en ({en_path})" if en_is_dir else f"--en is a file ({en_path})",
-            f"--de ({de_path})" if de_is_dir else f"--de is a file ({de_path})",
-            f"--ru ({ru_path})" if ru_is_dir else f"--ru is a file ({ru_path})",
-        ]
-        sys.exit(
-            "Error: --en, --de and --ru must all be files or all be directories.\n"
-            + "\n".join(f"  {m}" for m in mixed)
-        )
-
     en_files = sorted(en_path.rglob("*.json"))
     if not en_files:
         sys.exit(f"Error: no *.json files found under {en_path}")
 
-    triplets: list[tuple[Path, Path, Path]] = []
+    triplets: list[tuple[Path, Path | None, Path | None]] = []
     for en_file in en_files:
         rel     = en_file.relative_to(en_path)
-        de_file = de_path / rel
-        ru_file = ru_path / rel
+        de_file = de_path / rel if de_path is not None else None
+        ru_file = ru_path / rel if ru_path is not None else None
         triplets.append((en_file, de_file, ru_file))
 
     return triplets
@@ -858,10 +877,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--en",        required=True, metavar="FILE/DIR",
                    help="English source: a single JSON file or a directory of JSON files")
-    p.add_argument("--de",        required=True, metavar="FILE/DIR",
-                   help="German target: a single JSON file or a directory (must match --en)")
-    p.add_argument("--ru",        required=True, metavar="FILE/DIR",
-                   help="Russian target: a single JSON file or a directory (must match --en)")
+    p.add_argument("--de",        default=None, metavar="FILE/DIR",
+                   help="German target: a single JSON file or a directory (must match --en). "
+                        "Optional — omit to produce EN→RU output only.")
+    p.add_argument("--ru",        default=None, metavar="FILE/DIR",
+                   help="Russian target: a single JSON file or a directory (must match --en). "
+                        "Optional — omit to produce EN→DE output only.")
     p.add_argument("--out",       default="output", metavar="DIR",
                    help="Output directory  (default: output/)")
     p.add_argument("--same-keys", action="store_true",
@@ -893,8 +914,21 @@ def main() -> None:
         if args.text_fields else set()
     )
 
+    if args.de is None and args.ru is None:
+        build_parser().error("at least one of --de or --ru is required")
+
+    has_de = args.de is not None
+    has_ru = args.ru is not None
+    active_langs: frozenset[str] = frozenset(
+        lang for lang, present in (("de", has_de), ("ru", has_ru)) if present
+    )
+
     # ── 1. Resolve file triplets ──────────────────────────────────────────────
-    triplets = resolve_triplets(Path(args.en), Path(args.de), Path(args.ru))
+    triplets = resolve_triplets(
+        Path(args.en),
+        Path(args.de) if args.de else None,
+        Path(args.ru) if args.ru else None,
+    )
     dir_mode = Path(args.en).is_dir()
     print(
         f"\n── {'Directory' if dir_mode else 'File'} mode"
@@ -910,15 +944,20 @@ def main() -> None:
 
         # Load
         en_data = load_json(en_p, f"{prefix} EN", stats)
-        de_data = load_json(de_p, f"{prefix} DE", stats)
-        ru_data = load_json(ru_p, f"{prefix} RU", stats)
+        de_data = load_json(de_p, f"{prefix} DE", stats) if de_p is not None else None
+        ru_data = load_json(ru_p, f"{prefix} RU", stats) if ru_p is not None else None
 
-        if any(d is None for d in (en_data, de_data, ru_data)):
+        if (en_data is None
+                or (has_de and de_data is None)
+                or (has_ru and ru_data is None)):
             print(f"  ⚠  Skipping triplet {i} (load failure)")
             continue
 
         # Lint
-        for data, label in ((en_data, "EN"), (de_data, "DE"), (ru_data, "RU")):
+        _lint_pairs = [(en_data, "EN")]
+        if has_de: _lint_pairs.append((de_data, "DE"))
+        if has_ru: _lint_pairs.append((ru_data, "RU"))
+        for data, label in _lint_pairs:
             before = len(stats.errors)
             lint(data, label, stats)
             n_new  = len(stats.errors) - before
@@ -936,7 +975,7 @@ def main() -> None:
             disable=not HAS_TQDM,
         ) as pbar:
             _walk(en_data, de_data, ru_data, "", None, args.same_keys, stats, pbar, raw,
-                  text_fields)
+                  text_fields, active_langs)
 
     if not raw:
         print("\nNo segments extracted. Aborting.")
@@ -963,7 +1002,9 @@ def main() -> None:
     # ── 8. Write TMX ──────────────────────────────────────────────────────────
     if not args.no_tmx:
         print("\n── Writing TMX ──────────────────────────────────────────────")
-        pairs = [("de", "de", "en-de.tmx"), ("ru", "ru", "en-ru.tmx")]
+        pairs = []
+        if has_de: pairs.append(("de", "de", "en-de.tmx"))
+        if has_ru: pairs.append(("ru", "ru", "en-ru.tmx"))
         for lang, attr, fname in pairs:
             out_path = out_dir / fname
             with _tqdm_cls(
@@ -984,14 +1025,14 @@ def main() -> None:
         xlsx_path = out_dir / "translations.xlsx"
         # 2 sheets × segments each
         with _tqdm_cls(
-            total=len(segments) * 2,
+            total=len(segments) * (int(has_de) + int(has_ru)),
             desc="  translations.xlsx",
             unit=" rows",
             dynamic_ncols=True,
             colour="yellow",
             disable=not HAS_TQDM,
         ) as pbar:
-            n = write_xlsx(segments, xlsx_path, pbar)
+            n = write_xlsx(segments, xlsx_path, pbar, has_de=has_de, has_ru=has_ru)
         if xlsx_path.exists():
             size_kb = xlsx_path.stat().st_size / 1024
             print(f"  ✓  translations.xlsx  ({n:,} segments, {size_kb:.1f} KB)")
