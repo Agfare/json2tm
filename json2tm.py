@@ -538,29 +538,67 @@ def _walk(
         de_l = de_node if isinstance(de_node, list) else []
         ru_l = ru_node if isinstance(ru_node, list) else []
 
-        if "de" in active_langs and len(de_l) != len(en_node):
-            stats.warn(
-                f"Array length mismatch at {path!r}: EN={len(en_node)}, DE={len(de_l)}"
-            )
-        if "ru" in active_langs and len(ru_l) != len(en_node):
-            stats.warn(
-                f"Array length mismatch at {path!r}: EN={len(en_node)}, RU={len(ru_l)}"
+        # Detect a UUID key on the first EN item so we can match by identity
+        uuid_key: str | None = None
+        if en_node and isinstance(en_node[0], dict):
+            uuid_key = next(
+                (k for k in en_node[0] if UUID_KEY_RE.search(k)),
+                None,
             )
 
-        for i, en_item in enumerate(en_node):
-            _walk(
-                en_item,
-                de_l[i] if i < len(de_l) else None,
-                ru_l[i] if i < len(ru_l) else None,
-                f"{path}[{i}]",
-                ctx_uuid,
-                same_keys,
-                stats,
-                pbar,
-                out,
-                text_fields,
-                active_langs,
-            )
+        if uuid_key:
+            # UUID-based matching — order differences between files are handled
+            de_by_uuid: dict[str, Any] = {
+                item[uuid_key]: item
+                for item in de_l
+                if isinstance(item, dict) and item.get(uuid_key)
+            }
+            ru_by_uuid: dict[str, Any] = {
+                item[uuid_key]: item
+                for item in ru_l
+                if isinstance(item, dict) and item.get(uuid_key)
+            }
+            for i, en_item in enumerate(en_node):
+                if not isinstance(en_item, dict):
+                    continue
+                uuid_val = en_item.get(uuid_key)
+                _walk(
+                    en_item,
+                    de_by_uuid.get(uuid_val) if uuid_val else None,
+                    ru_by_uuid.get(uuid_val) if uuid_val else None,
+                    f"{path}[{i}]",
+                    ctx_uuid,
+                    same_keys,
+                    stats,
+                    pbar,
+                    out,
+                    text_fields,
+                    active_langs,
+                )
+        else:
+            # Index-based matching (no UUID key present)
+            if "de" in active_langs and len(de_l) != len(en_node):
+                stats.warn(
+                    f"Array length mismatch at {path!r}: EN={len(en_node)}, DE={len(de_l)}"
+                )
+            if "ru" in active_langs and len(ru_l) != len(en_node):
+                stats.warn(
+                    f"Array length mismatch at {path!r}: EN={len(en_node)}, RU={len(ru_l)}"
+                )
+            for i, en_item in enumerate(en_node):
+                _walk(
+                    en_item,
+                    de_l[i] if i < len(de_l) else None,
+                    ru_l[i] if i < len(ru_l) else None,
+                    f"{path}[{i}]",
+                    ctx_uuid,
+                    same_keys,
+                    stats,
+                    pbar,
+                    out,
+                    text_fields,
+                    active_langs,
+                )
 
 
 # ── Pre-count (for a meaningful progress bar) ─────────────────────────────────
